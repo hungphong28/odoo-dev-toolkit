@@ -25,8 +25,13 @@ root_of() {
 
 discover() {
     local p r
-    for p in /opt/*-dev/source /opt/*-dev \
-             /opt/*-staging/source /opt/*-staging; do
+    local scan_root="${MAX_DISCOVERY_ROOT:-/opt}"
+    [[ -d "$scan_root" ]] || {
+        echo "BLOCKED: discovery root missing: $scan_root" >&2
+        return 1
+    }
+    for p in "$scan_root"/*-dev/source "$scan_root"/*-dev \
+             "$scan_root"/*-staging/source "$scan_root"/*-staging; do
         [[ -d "$p" ]] || continue
         p="$(realpath -e -- "$p")"
         r="$(root_of "$p")"
@@ -162,7 +167,7 @@ task_create() {
         return 1
     }
 
-    git -C "$path" switch -c "$branch" origin/main
+    git -C "$path" switch --no-track -c "$branch" origin/main
 
     echo "TASK_CREATED=PASS"
     echo "BRANCH=$branch"
