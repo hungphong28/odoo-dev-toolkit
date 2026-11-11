@@ -1,6 +1,6 @@
 # Odoo DEV Toolkit
 
-Version 0.1.0
+Version 0.1.1
 
 Reusable Git workspace management for Odoo Community projects
 running on one or many DEV servers.
@@ -60,3 +60,31 @@ application repositories.
 It does not automatically deploy or merge code.
 
 No PASS status is claimed without verification.
+
+
+## Multi-project discovery testing
+
+By default, discovery inspects conventional paths under `/opt`.
+
+For isolated tests or custom discovery locations:
+
+    MAX_DISCOVERY_ROOT=/path/to/projects max-workspace discover
+
+The same variable also applies to `init-all`.
+
+## Task tracking
+
+New `task/*` and `fix/*` branches start from `origin/main`
+using `--no-track`. They do not inherit `origin/main` as
+their upstream branch.
+
+Push explicitly with:
+
+    git push -u origin task/your-feature
+
+## Automated tests
+
+    bash tests/test_workspace_e2e.sh
+
+Tests use temporary Git repositories and must not modify
+real Odoo runtimes.
