@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export LC_ALL=C PAGER=cat GIT_PAGER=cat GIT_TERMINAL_PROMPT=0
+
+WS="${MAX_WORKSPACE_ROOT:-/opt/workspaces}"
+
+usage() {
+cat <<'EOF'
+MAX Odoo Workspace Toolkit
+
+Commands:
+  max-workspace discover
+  max-workspace init-all
+  max-workspace init /absolute/git/repo
+  max-workspace task /absolute/local/worktree task/name
+  max-workspace check
+
+No Docker, database or runtime deployment operations.
+EOF
+}
+
+root_of() {
+    git -C "$1" rev-parse --show-toplevel 2>/dev/null || :
+}
+
+discover() {
+    local p r
+    for p in /opt/*-dev/source /opt/*-dev \
+             /opt/*-staging/source /opt/*-staging; do
+        [[ -d "$p" ]] || continue
+        p="$(realpath -e -- "$p")"
+        r="$(root_of "$p")"
+        [[ "$r" == "$p" ]] && printf '%s\n' "$p"
+    done | sort -u
+}
+
+init_one() {
+    local src="$1" name project dest base sha existing
+
+    [[ "$src" == /* && -d "$src" ]] || {
+        echo "BLOCKED: invalid source: $src"
+        return 1
+    }
+
+    src="$(realpath -e -- "$src")"
+
+    [[ "$(root_of "$src")" == "$src" ]] || {
+        echo "BLOCKED: not Git root: $src"
+        return 1
+    }
+
+    [[ -z "$(git -C "$src" ls-files -u)" ]] || {
+        echo "BLOCKED: unresolved merge: $src"
+        return 1
+    }
+
+    while IFS= read -r existing; do
+        case "$existing" in
+            "$WS"/*|/opt/*-local/*)
+                echo "SKIP: existing LOCAL: $existing"
+                return 0
+                ;;
+        esac
+    done < <(
+        git -C "$src" worktree list --porcelain |
+            sed -n 's/^worktree //p'
+    )
+
+    name="$(basename "$src")"
+
+    if [[ "$name" == source || "$name" == src ]]; then
+        project="$(basename "$(dirname "$src")")"
+        project="${project%-dev}"
+        project="${project%-staging}"
+        name="$project"
+    else
+        project="${name%-dev}"
+        project="${project%-staging}"
+    fi
+
+    [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+        echo "BLOCKED: invalid project name"
+        return 1
+    }
+
+    dest="$WS/$project/$name"
+
+    [[ ! -e "$dest" && ! -L "$dest" ]] || {
+        echo "BLOCKED: destination exists: $dest"
+        return 1
+    }
+
+    git -C "$src" remote get-url origin >/dev/null
+    git -C "$src" fetch origin
+
+    if git -C "$src" rev-parse -q --verify \
+        'refs/remotes/origin/main^{commit}' >/dev/null; then
+        base="origin/main"
+    elif git -C "$src" rev-parse -q --verify \
+        'refs/remotes/origin/dev^{commit}' >/dev/null; then
+        base="origin/dev"
+        echo "NOTICE: dev-only repository; task requires main"
+    else
+        echo "BLOCKED: no main/dev remote baseline"
+        return 1
+    fi
+
+    sha="$(git -C "$src" rev-parse "$base")"
+
+    mkdir -p "$(dirname "$dest")"
+    git -C "$src" worktree add --detach "$dest" "$sha"
+
+    test "$(git -C "$dest" rev-parse HEAD)" = "$sha"
+    test -z "$(git -C "$dest" status --porcelain)"
+
+    echo "LOCAL_SETUP=PASS"
+    echo "PATH=$dest"
+    echo "BASE=$base"
+    echo "RUNTIME_UNCHANGED=YES"
+}
+
+task_create() {
+    local path="$1" branch="$2"
+
+    [[ "$path" == /* && -d "$path" ]] || {
+        echo "BLOCKED: invalid LOCAL path"
+        return 1
+    }
+
+    path="$(realpath -e -- "$path")"
+
+    [[ "$(root_of "$path")" == "$path" ]] || {
+        echo "BLOCKED: not worktree root"
+        return 1
+    }
+
+    case "$path" in
+        "$WS"/*|/opt/*-local/*) ;;
+        *)
+            echo "BLOCKED: not a LOCAL workspace"
+            return 1
+            ;;
+    esac
+
+    [[ "$branch" == task/* || "$branch" == fix/* ]] || {
+        echo "BLOCKED: requires task/* or fix/*"
+        return 1
+    }
+
+    git check-ref-format --branch "$branch" >/dev/null
+    test -z "$(git -C "$path" status --porcelain)"
+    test -z "$(git -C "$path" ls-files -u)"
+
+    git -C "$path" fetch origin main
+
+    git -C "$path" rev-parse -q --verify \
+        'refs/remotes/origin/main^{commit}' >/dev/null
+
+    ! git -C "$path" show-ref --verify --quiet \
+        "refs/heads/$branch" || {
+        echo "BLOCKED: branch exists"
+        return 1
+    }
+
+    git -C "$path" switch -c "$branch" origin/main
+
+    echo "TASK_CREATED=PASS"
+    echo "BRANCH=$branch"
+}
+
+check() {
+    local p
+    for p in "$WS"/*/* /opt/*-local/*; do
+        [[ -d "$p" ]] || continue
+        [[ "$(root_of "$p")" == "$p" ]] || continue
+        echo "===== $p ====="
+        git -C "$p" status -sb
+    done
+}
+
+case "${1:-}" in
+    discover)
+        discover
+        ;;
+    init)
+        shift
+        (($# > 0)) || { usage; exit 2; }
+        failed=0
+        for p in "$@"; do
+            init_one "$p" || failed=$((failed+1))
+        done
+        ((failed == 0))
+        ;;
+    init-all)
+        mapfile -t repos < <(discover)
+        ((${#repos[@]} > 0)) || {
+            echo "No repositories discovered"
+            exit 2
+        }
+        failed=0
+        for p in "${repos[@]}"; do
+            init_one "$p" || failed=$((failed+1))
+        done
+        ((failed == 0))
+        ;;
+    task)
+        (($# == 3)) || { usage; exit 2; }
+        task_create "$2" "$3"
+        ;;
+    check)
+        check
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
